@@ -409,3 +409,5 @@ LPD_updated_AOA2 = AOA2$DI > attr(LPD_RMSE_relation2, "AOA_threshold")
 
 plot(DI_expected_RMSE2,col=viridis(100),main="DI expected RMSE")
 plot(DI_updated_AOA2, col=c("grey","transparent"),add=TRUE,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+
+#fare differenza e rifare response

@@ -98,12 +98,11 @@ df <- corrplot(cor, method="number", col=viridis(30, alpha=1, begin=0, end=1, di
 )
 
 
-#the least correlated are: Precipitation.of.Coldest.Quarter(bio19), Max.Temperature.of.Warmest.Month (bio5), Precipitation.of.Driest.Quarter (bio17)
-#Mean.Temperature.of.Wettest.Quarter (bio10), Min.Temperature.of.Coldest.Month (bio6), Mean.Diurnal.Range (bio2), Isothermality (bio3)
-
+#the least correlated are: Isothermality (bio3),  Mean Daily Maximum Air Temperature of the Warmest Month (bio5), Mean Daily Mean Air Temperatures of the Wettest Quarter (bio8), 
+#Annual Precipitation Amount (bio12), Mean Monthly Precipitation Amount of the Driest Quarter (bio17), Mean Monthly Precipitation Amount of the Coldest Quarter (bio19).
 #select only some variables
 
-aus_stack <- aus_stack[[c(3,5,5,8,12,17,19)]]
+aus_stack <- aus_stack[[c(3,5,8,12,17,19)]]
 aus_stack
 
 plot(aus_stack, col=viridis(500, alpha =1, begin=0, end=1, direction=1))

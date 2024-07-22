@@ -415,8 +415,8 @@ num_blue_pixels <- sum(pixel_values == 1, na.rm = TRUE)
 
 # Print
 cat("N. red pixels:", num_red_pixels)
-#N. red pixels: 58764
+#N. red pixels: 10228
 
 cat("N. blu pixels", num_blue_pixels)
-#N. blu pixels 12032
+#N. blu pixels 59467
 

@@ -1,0 +1,974 @@
+#set the working directory
+setwd("C:/Documenti/Laurea magistrale/Tirocinio Duccio")
+
+#####################################################################à
+#SDMs ANALYSIS
+#MaxEnt
+#tutorial: 
+
+#https://shandongfx.github.io/NIMBioSENM/06-maxent-manipulation/index.html
+#let's load all the packages
+packages_needed <- c("raster", # for raster analysis
+                     "dismo", # a collection of ENM/SDM tools
+                     "rgeos","rgdal","sp", # spatial data analysis
+                     "ENMeval", # a few new tools in ENM/SDM
+                     "wallace",   # interface for Maxent and ENMeval
+                     "utils", # for zip & unzip files
+                     "jsonlite" # necessary for download data from GBIF
+)
+
+pk_to_install <- packages_needed [!( packages_needed %in% rownames(installed.packages())  )]
+if(length(pk_to_install)>0 ){
+  install.packages(pk_to_install,repos="http://cran.r-project.org")
+}
+
+library(raster)
+library(dismo)
+library(rgeos)
+library(sp)
+library(rgdal)
+library(ENMeval)
+library(geodata)
+
+if( !("rJava" %in% rownames(installed.packages()))  ){
+  install.packages("rJava",repos="http://cran.r-project.org")
+}
+install.packages("rJava")
+library("rJava")
+
+if(!require(devtools)){
+  install.packages("devtools")
+}
+
+if(!require(kuenm)){
+  devtools::install_github("marlonecobos/kuenm")
+}
+install.packages("kuenm")
+library("kuenm")
+
+#lnow let's set up the Maxent path
+# download maxent.jar 3.3.3k, and place the file in the desired folder; note that, there may be a newer version of Maxent
+if( !file.exists(paste0(system.file("java", package="dismo"),"/maxent.jar"))  )   {
+  utils::download.file(url="https://raw.githubusercontent.com/mrmaxent/Maxent/master/ArchivedReleases/3.3.3k/maxent.jar",
+                       destfile=paste0(system.file("java", package="dismo"),"/maxent.jar"),
+                       mode="wb") ## wb for binary file, otherwise maxent.jar can not execute
+}  
+
+if(!file.exists("code")) dir.create("code")
+if(!file.exists("data")) dir.create("data")
+if(!file.exists("data/bioclim")) dir.create("data/bioclim")
+if(!file.exists("data/studyarea")) dir.create("data/studyarea")
+if(!file.exists("output")) dir.create("output")
+
+#upload occurrence data from gbif
+m_occ <- read.csv("m_occ.csv", sep="\t")
+m_subset
+
+#make occurrence data spatial
+coordinates(m_subset) <- ~ decimalLongitude + decimalLatitude
+
+
+cat("the previous object is: ", class(m_subset),"\n") 
+head(m_subset@coords)
+crs(m_subset)
+# Define the coordinate system that will be used
+myCRS <- CRS("+init=epsg:4326") # WGS 84
+crs(m_subset) <- myCRS
+crs(m_subset)
+
+#crs projections
+m_occ_projected <- spTransform(m_subset, myCRS)
+plot(m_subset)
+plot(m_occ_projected)
+
+#read/write shapefile files
+dir.create("temp")
+shapefile(m_subset, "temp/m_shp.shp", overwrite=TRUE)
+loaded_shapefile <- shapefile("temp/m_shp.shp")
+
+#raster data
+library("raster")
+require(utils)
+if(!file.exists("data")) dir.create("data")
+if(!file.exists("data/bioclim")) dir.create("data/bioclim")
+if(!file.exists("data/studyarea")) dir.create("data/studyarea")
+if(!file.exists("output")) dir.create("output")
+
+#we use CHELSA data
+
+#spatial analysis
+#prepare occ and raster
+plot(aus_stack$isothermality)
+plot(m_subset, add=T)
+
+#extract environmental conditions of occ raster layers
+conditions_occ <- extract(aus_stack, m_subset)
+head(conditions_occ)
+
+#remove NA
+bad_records <- is.na(conditions_occ[,1])
+table(bad_records)
+
+conditions_occ[bad_records,]
+m_subset <- m_subset[!bad_records,]
+
+#cut the raster layer with fine boundry
+occ_buffer <- buffer(m_subset, width=5*10^5)
+clim_mask <- mask(aus_stack, occ_buffer)
+
+#draw background samples
+set.seed(1)
+bg <- sampleRandom(x=clim_mask, size=500, na.rm=T, sp=T)
+head(bg)
+
+plot(clim_mask[[1]])
+plot(bg, add=T, col="black")
+plot(m_subset, add=T, col="red")
+
+#split occurrence data into training and testing
+#randomly select 80% for training
+selected <- sample(1:nrow(m_subset), nrow(m_subset)*0.8)
+occ_train <- m_subset[selected,]
+occ_test <- m_subset[-selected,]
+
+plot(occ_train, col="blue")
+plot(occ_test, col="red", add=T)
+
+#simple modeling workflow
+#re-format data input for maxent
+cat(class(clim_mask), "", class(m_subset))
+m0 <- maxent(x=clim_mask, p=m_subset)
+
+#extract env condition for training, testing and background data
+env_occ_train <- extract(aus_stack, occ_train)
+env_occ_test <- extract(aus_stack, occ_test)
+env_bg <- extract(aus_stack, bg)
+
+#combine the conditions by row
+myPredictors <- rbind(env_occ_train, env_bg)
+
+#change matrix to dataframe
+myPredictors <- as.data.frame(myPredictors)
+head(myPredictors)
+
+# repeat the number 1 as many times as the number of rows in p, 
+# and repeat 0 for the rows of background points
+myResponse <- c(rep(1,nrow(env_occ_train)),
+                rep(0,nrow(env_bg)))
+
+mod <- maxent(x=myPredictors, p=myResponse)
+mod@lambdas
+
+#predict function
+#project model on raster layers (training layers)
+ped1 <- predict(mod, clim_mask)
+plot(ped1, col= viridis(100), main="MaxEnt predictions")
+points(wildnet_shp, pch=16, col= "deeppink", cex=1)
+points(BRI_shp, pch=16, col= "paleturquoise", cex=1)
+
+colors <- c("deeppink", "paleturquoise")
+
+legend("topright", legend=c("Wildnet dataset", "BRI dataset"), col= colors, pch=16, cex=1)
+
+dev.off()
+ped2 <- predict(mod, env_occ_train)
+head(ped2)
+
+#model evaluation
+mod_eval_train <- dismo::evaluate(p=env_occ_train, a=env_bg, model=mod)
+print(mod_eval_train)
+
+#testing data
+mod_eval_test <- dismo::evaluate(p=env_occ_test, a=env_bg, model=mod)
+print(mod_eval_test)
+
+#compare training and testing AUC
+cat("the training AUC is:", mod_eval_train@auc, "\n")
+
+cat("the testing AUC is:", mod_eval_test@auc, "\n")
+
+cor_train <- cor(env_occ_train, predict(mod, env_occ_train), use = "complete.obs")
+cat("Training COR:", cor_train, "\n")
+
+#tresholds our continuous predictions of suitability into binary predictions 
+thd1 <- threshold(mod_eval_train,stat="no_omission") # 0% omission rate 
+thd2 <- threshold(mod_eval_train,stat="spec_sens") # highest TSS
+thd3 <- threshold(mod_eval_train,stat="sensitivity",sensitivity=0.9) # 10% omission rate, i.e. sensitivity=0.9
+thd4 <- threshold(mod_eval_train,stat="sensitivity",sensitivity=0.95) # 5% omission rate, i.e. sensitivity=0.95
+
+plot(ped1>=thd1)
+
+###################################################################
+#GAM e GLM
+# load required libraries
+library(spatialEco)
+library(dismo)
+library(disdat)
+library(sf)
+library(geodata)
+library(dplyr)
+library(tidyr)
+library(raster)
+library(viridis)
+
+if(!require(devtools)){
+  install.packages("devtools")
+}
+
+if(!require(kuenm)){
+  devtools::install_github("marlonecobos/kuenm")
+}
+install.packages("kuenm")
+library("kuenm")
+
+setwd("C:/Documenti/Laurea magistrale/Tirocinio Duccio")
+
+# upload occurrence data from gbif
+m_occ <- read.csv("m_occ.csv", sep="\t")
+
+# using CHELSA data
+
+# generating background points
+bg <- randomPoints(aus_stack, n=500) %>% as.data.frame()
+colnames(bg) <- c("decimalLongitude", "decimalLatitude")
+bg <- bg[, c(2,1)]
+
+occurrences <- m_occ[, c("decimalLatitude", "decimalLongitude")] %>% as.data.frame()
+
+# extract raster values and create training data
+training <- bind_rows(occurrences, bg) %>% mutate(occ = c(rep(1, nrow(occurrences)), rep(0, nrow(bg))))
+
+# make occurrence data spatial
+coordinates(training) <- ~ decimalLongitude + decimalLatitude
+myCRS <- CRS("+init=epsg:4326") # WGS 84
+crs(training) <- myCRS
+
+# extract conditions of occ raster layers
+env_coords <- extract(aus_stack, training)
+coords_df <- as.data.frame(env_coords)
+complete_data <- cbind(training, coords_df)
+complete_data <- na.omit(as.data.frame(complete_data))
+
+# GLM model
+glm_model <- glm(occ ~ isothermality + mean.daily.maximum.air.temperature.of.the.warmest.month + 
+                   mean.daily.mean.air.temperatures.of.the.wettest.quarter + 
+                   annual.precipitation.amount + mean.monthly.precipitation.amount.of.the.driest.quarter + 
+                   mean.monthly.precipitation.amount.of.the.coldest.quarter, 
+                 data = complete_data)
+
+# GAM model
+gam <- gam(occ ~ s(isothermality, 2) + s(mean.daily.maximum.air.temperature.of.the.warmest.month, 2) + 
+             s(mean.daily.mean.air.temperatures.of.the.wettest.quarter, 2) + 
+             s(annual.precipitation.amount, 2) + 
+             s(mean.monthly.precipitation.amount.of.the.driest.quarter, 2) + 
+             s(mean.monthly.precipitation.amount.of.the.coldest.quarter, 2), 
+           data = complete_data, family = "binomial")
+
+# AUC e COR calcoli per GLM e GAM
+glm_predictions <- predict(glm_model, newdata = complete_data, type = "response")
+glm_actual <- complete_data$occ
+glm_eval <- evaluate(p = glm_predictions[glm_actual == 1], a = glm_predictions[glm_actual == 0])
+glm_auc <- glm_eval@auc
+cat("GLM AUC:", glm_auc, "\n")
+
+# Calcolare COR per GLM
+glm_cor <- cor(glm_predictions, glm_actual)
+cat("GLM COR:", glm_cor, "\n")
+
+# AUC e COR calcoli per GAM
+gam_predictions <- predict(gam, type = "response", newdata = complete_data)
+gam_actual <- complete_data$occ
+gam_eval <- evaluate(p = gam_predictions[gam_actual == 1], a = gam_predictions[gam_actual == 0])
+gam_auc <- gam_eval@auc
+cat("GAM AUC:", gam_auc, "\n")
+
+# Calcolare COR per GAM
+gam_cor <- cor(gam_predictions, gam_actual)
+cat("GAM COR:", gam_cor, "\n")
+# load required libraries
+library(spatialEco)
+library(dismo)
+library(disdat)
+library(sf)
+library(geodata)
+library(dplyr)
+library(tidyr)
+library(raster)
+library(viridis)
+
+if(!require(devtools)){
+  install.packages("devtools")
+}
+
+if(!require(kuenm)){
+  devtools::install_github("marlonecobos/kuenm")
+}
+install.packages("kuenm")
+library("kuenm")
+
+setwd("C:/Documenti/Laurea magistrale/Tirocinio Duccio")
+
+# upload occurrence data from gbif
+m_occ <- read.csv("m_occ.csv", sep="\t")
+
+# using CHELSA data
+
+# generating background points
+bg <- randomPoints(aus_stack, n=500) %>% as.data.frame()
+colnames(bg) <- c("decimalLongitude", "decimalLatitude")
+bg <- bg[, c(2,1)]
+
+occurrences <- m_occ[, c("decimalLatitude", "decimalLongitude")] %>% as.data.frame()
+
+# extract raster values and create training data
+training <- bind_rows(occurrences, bg) %>% mutate(occ = c(rep(1, nrow(occurrences)), rep(0, nrow(bg))))
+
+# make occurrence data spatial
+coordinates(training) <- ~ decimalLongitude + decimalLatitude
+myCRS <- CRS("+init=epsg:4326") # WGS 84
+crs(training) <- myCRS
+
+# extract conditions of occ raster layers
+env_coords <- extract(aus_stack, training)
+coords_df <- as.data.frame(env_coords)
+complete_data <- cbind(training, coords_df)
+complete_data <- na.omit(as.data.frame(complete_data))
+
+# GLM model
+glm_model <- glm(occ ~ isothermality + mean.daily.maximum.air.temperature.of.the.warmest.month + 
+                   mean.daily.mean.air.temperatures.of.the.wettest.quarter + 
+                   annual.precipitation.amount + mean.monthly.precipitation.amount.of.the.driest.quarter + 
+                   mean.monthly.precipitation.amount.of.the.coldest.quarter, 
+                 data = complete_data)
+
+# GAM model
+gam <- gam(occ ~ s(isothermality, 2) + s(mean.daily.maximum.air.temperature.of.the.warmest.month, 2) + 
+             s(mean.daily.mean.air.temperatures.of.the.wettest.quarter, 2) + 
+             s(annual.precipitation.amount, 2) + 
+             s(mean.monthly.precipitation.amount.of.the.driest.quarter, 2) + 
+             s(mean.monthly.precipitation.amount.of.the.coldest.quarter, 2), 
+           data = complete_data, family = "binomial")
+
+# Crea una griglia regolare per le previsioni
+lon_min <- min(complete_data$decimalLongitude)
+lon_max <- max(complete_data$decimalLongitude)
+lat_min <- min(complete_data$decimalLatitude)
+lat_max <- max(complete_data$decimalLatitude)
+
+# Crea la griglia
+grid <- expand.grid(
+  decimalLongitude = seq(lon_min, lon_max, length.out = 100),
+  decimalLatitude = seq(lat_min, lat_max, length.out = 100)
+)
+
+# Converti grid in oggetto spaziale
+coordinates(grid) <- ~ decimalLongitude + decimalLatitude
+crs(grid) <- myCRS  # Imposta il sistema di riferimento se necessario
+
+# Estrai i valori delle variabili ambientali dalla raster stack
+grid_env <- extract(aus_stack, grid)
+
+# Combina le variabili ambientali con la griglia
+grid_combined <- cbind(as.data.frame(grid), grid_env)
+
+# Previsioni GLM
+grid_combined$predictions_glm <- predict(glm_model, newdata = grid_combined, type = "response")
+raster_pred_glm <- rasterFromXYZ(grid_combined[, c("decimalLongitude", "decimalLatitude", "predictions_glm")])
+
+# Previsioni GAM
+# Assicurati di utilizzare il nome corretto del tuo modello GAM
+grid_combined$predictions_gam <- predict(gam_model, newdata = grid_combined, type = "response")
+raster_pred_gam <- rasterFromXYZ(grid_combined[, c("decimalLongitude", "decimalLatitude", "predictions_gam")])
+
+# Plot raster GLM
+plot(raster_pred_glm, col = viridis(100), main = "GLM Predictions")
+points(wildnet_shp, pch = 16, col = "deeppink", cex = 1)
+points(BRI_shp, pch = 16, col = "paleturquoise", cex = 1)
+
+colors <- c("deeppink", "paleturquoise")
+legend("top", legend = c("Wildnet dataset", "BRI dataset"), col = colors, pch = 16, cex = 1)
+
+# Plot raster GAM
+plot(raster_pred_gam, col = viridis(100), main = "GAM Predictions")
+points(wildnet_shp, pch = 16, col = "deeppink", cex = 1)
+points(BRI_shp, pch = 16, col = "paleturquoise", cex = 1)
+
+legend("top", legend = c("Wildnet dataset", "BRI dataset"), col = colors, pch = 16, cex = 1)
+
+##################################
+#Random Forest
+#load required libraries
+library(spatialEco)
+library(dismo)
+library(disdat)
+library(sf)
+library(randomForest)
+library(geodata)
+library(dplyr)
+library(tidyr)
+if(!require(devtools)){
+  install.packages("devtools")
+}
+
+if(!require(kuenm)){
+  devtools::install_github("marlonecobos/kuenm")
+}
+install.packages("kuenm")
+library("kuenm")
+
+setwd("C:/Documenti/Laurea magistrale/Tirocinio Duccio")
+
+
+#generating background points
+bg <- randomPoints(aus_stack, n=500)%>%as.data.frame()
+colnames(bg) <- c("decimalLongitude", "decimalLatitude")
+bg <- bg[, c(2,1)]
+
+occurrences <- m_occ[, c("decimalLatitude", "decimalLongitude")]%>%as.data.frame()
+occurrences
+
+#extract raster values and create training data
+training <- bind_rows(occurrences, bg)%>%mutate(occ = c(rep(1, nrow(occurrences)), rep(0, nrow(bg))))
+
+#turn training data into spatial points
+coordinates(training) <- ~ decimalLongitude + decimalLatitude
+cat("the previous object is: ", class(training),"\n") 
+head(training@coords)
+crs(training)
+# Define the coordinate system that will be used
+myCRS <- CRS("+init=epsg:4326") # WGS 84
+crs(training) <- myCRS
+crs(training)
+
+raster::pairs(aus_stack,maxpixels=1000)
+
+training <- extract(aus_stack, training)
+training <- as.data.frame(training)
+training$occ <- c(rep(1, nrow(occurrences)), rep(0, nrow(bg)))
+training <- na.omit(training)
+
+head(training)
+
+#model fitting with randomForest 
+#default (classification) RF
+training$occ <- as.factor(training$occ)
+
+#default classification RF
+rf_def <- randomForest(occ~ ., data=training, ntree=1000)
+
+#predict to raster layers
+pred_def <- predict(aus_stack, rf_def, type="prob", index=2)
+
+plot(pred_def, col=viridis(100), main="Random Forest predictions")
+
+points(wildnet_shp, pch=16, col= "deeppink", cex=1)
+points(BRI_shp, pch=16, col= "paleturquoise", cex=1)
+
+colors <- c("deeppink", "paleturquoise")
+
+legend("topright", legend=c("Wildnet dataset", "BRI dataset"), col= colors, pch=16, cex=1)
+
+######################################
+#Datasets Analysis
+#upload all libraries
+
+library(viridis)
+library(raster)
+library(sp)
+library(readr)
+library(terra)
+library(sf)
+library(ecospat)
+library(rgbif)
+library(ade4)
+library(ape)
+library(corrplot)
+library(ggcorrplot)
+library(ggplot2)
+library(tidyverse)
+
+#load the cvs file with mangroves data
+m_occ <- read.csv("m_occ.csv", sep="\t")
+m_occ
+
+#upload the shapefiles from qgis
+m_shp <- vect("C:/Documenti/Laurea magistrale/Tirocinio Duccio/m_shp.shp")
+wildnet_shp <- vect("C:/Documenti/Laurea magistrale/Tirocinio Duccio/wildnet_shp.shp")
+BRI_shp <- vect("C:/Documenti/Laurea magistrale/Tirocinio Duccio/BRI_shp.shp")
+
+#let's keep only the data for lat, long and year of observation
+m_subset <- m_occ[, c("decimalLatitude", "decimalLongitude", "year", "institutionCode")]
+m_subset
+
+# String containing the names of raster files
+rastlist <- list.files(path ="C:/Documenti/Laurea magistrale/Tirocinio Duccio/bioclim", pattern = "CHELSA", full.names = TRUE)
+
+
+# Using the list of names, all the files are imported into a single raster package
+test_raster <- terra::rast(rastlist)
+rasters <- lapply(rastlist, terra::rast)
+mystack <- terra::rast(rasters)
+print(mystack)
+
+names(mystack) <- c("mean annual air temperature",
+                    "mean diurnal air temperature range",
+                    "isothermality",
+                    "temperature seasonality",
+                    "mean daily maximum air temperature of the warmest month",
+                    "mean daily minimum air temperature of the coldest month",
+                    "annual range of air temperature",
+                    "mean daily mean air temperatures of the wettest quarter",
+                    "mean daily mean air temperatures of the driest quarter",
+                    "mean daily mean air temperatures of the warmest quarter",
+                    "mean daily mean air temperatures of the coldest quarter",
+                    "annual precipitation amount",
+                    "precipitation amount of the wettest month",
+                    "precipitation amount of the driest month",
+                    "precipitation seasonality",
+                    "mean monthly precipitation amount of the wettest quarter",
+                    "mean monthly precipitation amount of the driest quarter",
+                    "mean monthly precipitation amount of the warmest quarter",
+                    "mean monthly precipitation amount of the coldest quarter")
+mystack
+
+plot(mystack, col =  viridis(500, alpha = 1, begin = 0, end = 1, direction = 1))
+
+#crop for area of interest in Australia
+xmin <- 150.65833
+xmax <- 154.21909
+ymin <- -28.42186
+ymax <- -22.93638
+
+ext <- terra::ext(c(xmin, xmax, ymin, ymax))
+aus_data <- terra::crop(mystack, ext)
+plot(aus_data, col =  viridis (500, alpha = 1, begin = 0, end = 1, direction = 1))
+
+#let's try to visualize one of the viariables with the points of occ
+plot(aus_data$`mean annual air temperature`, col =  viridis (500, alpha = 1, begin = 0, end = 1, direction = 1))
+points(m_shp, pch=16, col= 9, cex=1)
+
+aus_stack <- stack(aus_data)
+
+#######################################
+#statistical analysis
+#1. correlation matrix (shows which variables are strongly associated)
+# Subsample 10% of pixels and calculate pairwise correlations
+r1 <- aus_stack$mean.annual.air.temperature
+cor <- cor(sampleRandom(aus_stack, size=ncell(r1)*0.30), method="pearson")
+cor
+
+#plot the correlation matrix
+df <- corrplot(cor, method="number", col=viridis(30, alpha=1, begin=0, end=1, direction=1), type="lower", tl.pos='ld')
+)
+
+
+#the least correlated are: Precipitation.of.Coldest.Quarter(bio19), Max.Temperature.of.Warmest.Month (bio5), Precipitation.of.Driest.Quarter (bio17)
+#Mean.Temperature.of.Wettest.Quarter (bio10), Min.Temperature.of.Coldest.Month (bio6), Mean.Diurnal.Range (bio2), Isothermality (bio3)
+
+#select only some variables
+
+aus_stack <- aus_stack[[c(3,5,8,12,17,19)]]
+aus_stack
+
+plot(aus_stack, col=viridis(500, alpha =1, begin=0, end=1, direction=1))
+
+#let's create three different stacks for each dataset
+wildnet <- m_subset%>%filter(institutionCode!="BRI")
+BRI_herbrecs <- m_subset%>%filter(institutionCode=="BRI")
+
+write.csv(wildnet, file = "wildnet.csv", row.names = FALSE)
+write.csv(BRI_herbrecs, file = "BRI.csv", row.names = FALSE)
+
+# Caricare i pacchetti
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(maps)
+
+
+area_of_interest <- st_polygon(list(rbind(c(xmin, ymin), 
+                                          c(xmin, ymax), 
+                                          c(xmax, ymax), 
+                                          c(xmax, ymin), 
+                                          c(xmin, ymin))))
+
+# Converti in un oggetto sf
+aoi_sf <- st_sfc(area_of_interest, crs = 4326)  # Mantieni EPSG:4326
+
+# Trasforma l'area di interesse in EPSG:3857 per la visualizzazione
+aoi_sf_3857 <- st_transform(aoi_sf, crs = 3857)
+
+# Crea una mappa del mondo
+world_map <- st_as_sf(maps::map("world", plot = FALSE, fill = TRUE))
+
+# Trasforma la mappa di base in EPSG:3857
+world_map_3857 <- st_transform(world_map, crs = 4326) # Non serve trasformare a 3857 qui
+
+# Assicurati che wildnet_shp e BRI_shp siano correttamente definiti
+wildnet_sf <- st_as_sf(wildnet_shp)  # Assicurati che wildnet_shp sia un oggetto sf
+BRI_sf <- st_as_sf(BRI_shp)          # Assicurati che BRI_shp sia un oggetto sf
+
+# Controlla che i dati siano in EPSG:4326 prima della trasformazione
+st_crs(wildnet_sf) <- st_crs(4326)  # Imposta EPSG:4326
+st_crs(BRI_sf) <- st_crs(4326)      # Imposta EPSG:4326
+
+# Trasforma i dati in EPSG:3857
+wildnet_sf <- st_transform(wildnet_sf, crs = 3857)
+BRI_sf <- st_transform(BRI_sf, crs = 3857)
+
+# Crea la visualizzazione
+ggplot() +
+  geom_sf(data = world_map_3857, fill = "white", color = "black") +  # Mappa di base
+  geom_sf(data = wildnet_sf, aes(color = "Wildnet dataset"), size = 3, shape = 16) +  # Dati Wildnet
+  geom_sf(data = BRI_sf, aes(color = "BRI dataset"), size = 3, shape = 16) +  # Dati BRI
+  geom_sf(data = aoi_sf_3857, fill = NA, color = "black", size = 1.5) +  # Poligono dell'area di interesse
+  coord_sf(xlim = c(xmin, xmax), ylim = c(ymin, ymax), expand = FALSE) +  # Limiti della mappa
+  labs(title = "Area of Interest", x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  scale_color_manual(values = c("paleturquoise", "deeppink")) +
+  guides(color = guide_legend(title = "Dataset"))
+
+xmin <- 150.65833
+xmax <- 154.21909
+ymin <- -28.42186
+ymax <- -22.93638
+
+area_of_interest <- st_polygon(list(rbind(c(xmin, ymin), 
+                                          c(xmin, ymax), 
+                                          c(xmax, ymax), 
+                                          c(xmax, ymin), 
+                                          c(xmin, ymin))))
+
+# Converti in un oggetto sf
+aoi_sf <- st_sfc(area_of_interest, crs = 4326)  # Mantieni EPSG:4326
+aoi_sf_3857 <- st_transform(aoi_sf, crs = 3857)
+
+# Crea una mappa dell'Australia
+australia_map <- st_as_sf(maps::map("world", plot = FALSE, fill = TRUE))
+australia_map_3857 <- st_transform(australia_map, crs = 4326)
+
+# Crea il grafico
+ggplot() +
+  geom_sf(data = australia_map_3857, fill = "white", color = "black") +  # Mappa dell'Australia
+  geom_sf(data = aoi_sf_3857, fill = NA, color = "deeppink", size = 1.5) +  # Poligono dell'area di interesse
+  coord_sf(xlim = c(110, 160), ylim = c(-45, -10), expand = FALSE) +  # Limiti della mappa
+  labs(title = "Mappa dell'Australia con Area di Interesse", 
+       x = "Longitudine", 
+       y = "Latitudine") +
+  theme_minimal()
+
+
+##########RANDOM FOREST AOI##################
+#
+library(CAST)
+library(caret)
+library(terra)
+library(sf)
+library(viridis)
+
+#generate predictors
+
+#let's use the most important values of each dataset as response
+
+response1 <- aus_stack$annual.precipitation.amount
+response2 <- aus_stack$mean.daily.mean.air.temperatures.of.the.wettest.quarter
+
+#set.seed(15)
+#samplepoints <- st_as_sf(st_sample(mask,20,"random"))
+
+#plot(response, col=viridis(100))
+#plot(samplepoints, col="red", add=T, pch=3)
+
+coordinates(wildnet) <- ~ decimalLongitude + decimalLatitude
+crs(wildnet)
+myCRS <- CRS("+init=epsg:4326") # WGS 84
+crs(wildnet) <- myCRS
+
+coordinates(BRI_herbrecs) <-~ decimalLongitude + decimalLatitude
+crs(BRI_herbrecs) <- myCRS
+
+#model training
+#predictors and response are extracted for the sampling locations
+trainDat1 <- terra::extract(aus_stack, wildnet)
+trainDat2 <- terra::extract(aus_stack, BRI_herbrecs)
+trainDat1 <- na.omit(trainDat1)
+trainDat2 <- na.omit(trainDat1)
+
+trainRes1 <- terra::extract(response1, wildnet, na.rm=FALSE, ID=FALSE)
+trainRes2 <- terra::extract(response2, BRI_herbrecs, na.rm=FALSE, ID=FALSE)
+
+
+# Estrai i predittori e la risposta per le posizioni di campionamento
+trainDat1 <- extract(aus_stack, wildnet)
+trainDat1 <- na.omit(as.data.frame(trainDat1))
+
+trainDat2 <- extract(aus_stack, BRI_herbrecs)
+trainDat2 <- na.omit(as.data.frame(trainDat2))
+
+trainRes1 <- extract(response1, wildnet)
+trainRes1 <- na.omit(as.numeric(unlist(trainRes1)))
+
+trainRes2 <- extract(response2, BRI_herbrecs)
+trainRes2 <- na.omit(as.numeric(unlist(trainRes2)))
+
+#train the model with RandomForest
+set.seed(10)
+model1 <- train(trainDat1[,names(aus_stack)], trainRes1, method="rf", importance=TRUE,
+                trControl=trainControl(method="cv"))
+print(model1)
+
+
+#Random Forest 
+
+#33 samples
+#7 predictor
+
+#No pre-processing
+#Resampling: Cross-Validated (10 fold) 
+#Summary of sample sizes: 30, 31, 30, 29, 29, 29, ... 
+#Resampling results across tuning parameters:
+
+#  mtry  RMSE       Rsquared   MAE      
+#mtry  RMSE       Rsquared   MAE      
+#2     0.5268895  0.9855128  0.4125171
+#4     0.3559661  0.9924994  0.2831172
+#7     0.3196691  0.9935930  0.2566378
+
+#RMSE was used to select the optimal model using the smallest value.
+#The final value used for the model was mtry = 7.
+
+
+model2 <- train(trainDat2[,names(aus_stack)], trainRes2, method="rf", importance=TRUE,
+                trControl=trainControl(method="cv"))
+print(model2)
+
+#Random Forest 
+
+#33 samples
+#7 predictor
+
+#No pre-processing
+#Resampling: Cross-Validated (10 fold) 
+#Summary of sample sizes: 29, 30, 29, 30, 29, 29, ... 
+#Resampling results across tuning parameters:
+
+#  mtry  RMSE      Rsquared   MAE     
+#2     59.47183  0.4706519  48.33773
+#4     59.68472  0.5408599  48.55268
+#7     60.34299  0.4631923  48.75894
+
+#RMSE was used to select the optimal model using the smallest value.
+#The final value used for the model was mtry = 2.
+
+#variable importance
+
+plot(varImp(model1,scale = F),col="black")
+
+plot(varImp(model2,scale = F),col="black")
+
+#predict and calculate error
+
+prediction1 <- predict(aus_stack, model1, na.rm=T)
+truediff1 <- abs(aus_stack-response1)
+
+
+if (!inherits(response1, "SpatRaster")) {
+  response1 <- rast(response1)
+}
+if (!inherits(prediction1, "SpatRaster")) {
+  prediction1 <- rast(prediction1)
+}
+
+rast_list <- list(prediction1, response1)
+
+
+plot(rast(rast_list), main=c("prediction", "reference"))
+
+prediction2 <- predict(aus_stack, model2, na.rm=T)
+truediff2 <- abs(aus_stack-response2)
+
+if (!inherits(response2, "SpatRaster")) {
+  response2 <- rast(response2)
+}
+
+if (!inherits(prediction2, "SpatRaster")) {
+  prediction2 <- rast(prediction2)
+}
+
+
+rast_list2 <- list(prediction2, response2)
+
+
+plot(rast(rast_list2), main=c("prediction", "reference"))
+
+#AOA and LPD calculation
+library(CAST)
+AOA1 <- aoa(aus_stack, model1, LPD=TRUE, verbose=FALSE)
+class(AOA1)
+names(AOA1)
+print(AOA1)
+plot(AOA1)
+
+#AOA Threshold: 0.257617
+
+plot(truediff1,col=viridis(100),main="true prediction error")
+plot(AOA1$DI,col=viridis(100),main="DI")
+plot(AOA1$LPD,col=viridis(100),main="LPD")
+plot(prediction1, col=viridis(100),main="prediction for AOA")
+plot(AOA1$AOA,col=c("grey","transparent"),add=T,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+points(wildnet_shp, pch=16, col= 9, cex=1)
+
+# Supponiamo che il raster si chiami suitability_raster
+# Creiamo un raster categorizzato
+suitability_categorized <- classify(suitability_raster, cbind(c(-Inf, 5, 7, Inf), c(5, 7, Inf, Inf), c(1, 2, 3)))
+
+# Definire i colori per le categorie con viridis
+colors <- viridis(3)
+
+# Plot del raster categorizzato
+plot(suitability_raster, col = viridis(100), legend = FALSE, main = "Suitability")
+
+# Aggiungere la legenda personalizzata
+legend("topright", 
+       legend = c("Low suitability (<=5)", "Medium suitability (5-7)", "High suitability (>7)"), 
+       fill = colors,
+       title = "Suitability Levels")
+
+AOA2 <- aoa(aus_stack, model2, LPD=TRUE, verbose=FALSE)
+class(AOA2)
+names(AOA2)
+print(AOA2)
+plot(AOA2)
+
+#AOA Threshold: 0.5992955
+
+plot(truediff2,col=viridis(100),main="true prediction error")
+plot(AOA2$DI,col=viridis(100),main="DI")
+plot(AOA2$LPD,col=viridis(100),main="LPD")
+plot(prediction2, col=viridis(100),main="prediction for AOA")
+plot(AOA2$AOA,col=c("grey","transparent"),add=T,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+points(BRI_shp, pch=16, col= 17, cex=1)
+
+
+par(mfrow=c(1,2))
+plot1 <- plot(AOA1$AOA,col=c("grey","transparent"),add=T,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+plot2 <- plot(AOA2$AOA,col=c("grey","transparent"),add=T,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+
+dev.off()
+
+#comparison prediction error with model error
+
+#for widlnet:
+RMSE(values(prediction1)[values(AOA1$AOA)==1], values(response1)[values(AOA1$AOA)==1])
+#[1] 0.8084631
+
+RMSE(values(prediction1)[values(AOA1$AOA)==0], values(response2)[values(AOA1$AOA)==0])
+#[1] 378.6344
+
+model1$results
+# mtry      RMSE  Rsquared       MAE    RMSESD  RsquaredSD     MAESD
+#1    2 0.5268895 0.9855128 0.4125171 0.6239068 0.017893726 0.4789384
+#2    4 0.3559661 0.9924994 0.2831172 0.5040220 0.006503580 0.3777949
+#3    7 0.3196691 0.9935930 0.2566378 0.4718699 0.007014572 0.3410800
+
+#for BRI:
+RMSE(values(prediction2)[values(AOA2$AOA)==1], values(response2)[values(AOA2$AOA)==1])
+#[1] 46.38151
+
+RMSE(values(prediction2)[values(AOA2$AOA)==0], values(response2)[values(AOA2$AOA)==0])
+#[1] 116.8029
+
+model2$results
+#  mtry     RMSE  Rsquared      MAE   RMSESD RsquaredSD    MAESD
+#1    2 59.47183 0.4706519 48.33773 26.13916  0.3592187 22.16347
+#2    4 59.68472 0.5408599 48.55268 26.80674  0.3619568 21.76281
+#3    7 60.34299 0.4631923 48.75894 24.04433  0.3735160 19.85602
+
+
+library(scam)
+
+#relationship between DI/LPD and performance measure
+#DI_RMSE
+#for wildnet
+DI_RMSE_relation <- errorProfiles(model1, AOA1$parameters, multiCV=TRUE,
+                                  window.size=5, length.out = 5, variable="DI")
+plot(DI_RMSE_relation)
+
+#for BRI
+DI_RMSE_relation2 <- errorProfiles(model2, AOA2$parameters, multiCV=TRUE,
+                                   window.size=5, length.out = 5, variable="DI")
+plot(DI_RMSE_relation2)
+
+#LPD_RMSE
+#for wildnet
+LPD_RMSE_relation <- errorProfiles(model1, AOA1$parameters, multiCV=TRUE,
+                                   window.size=5, length.out=5, variable= "LPD")
+plot(LPD_RMSE_relation)
+
+#for BRI
+LPD_RMSE_relation2 <- errorProfiles(model2, AOA2$parameters,
+                                    multiCV=TRUE, window.size=5, length.out=5, variable="LPD")
+plot(LPD_RMSE_relation2)
+
+#for wildnet
+DI_expected_RMSE1 = terra::predict(AOA1$DI, DI_RMSE_relation)
+LPD_expected_RMSE1 = terra::predict(AOA1$LPD, LPD_RMSE_relation)
+
+# account for multiCV changing the DI threshold
+DI_updated_AOA1 = AOA1$DI > attr(DI_RMSE_relation, "AOA_threshold")
+
+# account for multiCV changing the DI threshold
+LPD_updated_AOA1 = AOA1$DI > attr(LPD_RMSE_relation, "AOA_threshold")
+
+plot(DI_expected_RMSE1,col=viridis(100),main="DI expected RMSE")
+plot(DI_updated_AOA1, col=c("grey","transparent"),add=TRUE,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+
+#for BRI
+DI_expected_RMSE2 = terra::predict(AOA2$DI, DI_RMSE_relation)
+LPD_expected_RMSE2 = terra::predict(AOA2$LPD, LPD_RMSE_relation)
+
+# account for multiCV changing the DI threshold
+DI_updated_AOA2 = AOA2$DI > attr(DI_RMSE_relation2, "AOA_threshold")
+
+# account for multiCV changing the DI threshold
+LPD_updated_AOA2 = AOA2$DI > attr(LPD_RMSE_relation2, "AOA_threshold")
+
+plot(DI_expected_RMSE2,col=viridis(100),main="DI expected RMSE")
+plot(DI_updated_AOA2, col=c("grey","transparent"),add=TRUE,plg=list(x="topleft",box.col="black",bty="o",title="AOA"))
+
+#difference (in pixel)
+
+#pixel difference between AOA1 and AOA2
+diff_wildnet <- ifel(AOA1$AOA == 1 & AOA2$AOA == 0, 1, NA)
+diff_BRI <- ifel(AOA1$AOA == 0 & AOA2$AOA == 1, -1, NA)
+diff_raster <- merge(diff_wildnet, diff_BRI)
+
+#palette
+col_palette <- c("deeppink", "darkgreen")
+
+#plot
+par(mfrow = c(1, 3), mar = c(5, 4, 4, 4) + 0.1)
+plot(AOA1$AOA, main = "AOA Model 1", col=c("grey", "transparent"), legend = FALSE)
+plot(AOA2$AOA, main = "AOA Model 2", col=c("grey", "transparent"), legend = FALSE)
+plot(diff_raster, col = col_palette, main = "Difference AOA", legend = FALSE)
+legend("topleft", legend = c("Model 2 only", "Model 1 only"), fill = col_palette, cex = 0.8, bty = "n")
+par(mfrow = c(1, 1))
+dev.off()
+
+#### Spatial difference ####
+pixel_values <- values(diff_raster)
+
+# Num. red and blue pixels
+num_red_pixels <- sum(pixel_values == -1, na.rm = TRUE)
+num_blue_pixels <- sum(pixel_values == 1, na.rm = TRUE)
+
+# Print
+cat("N. red pixels:", num_red_pixels)
+#N. red pixels: 10228
+
+cat("N. blu pixels", num_blue_pixels)
+#N. blu pixels 59467
+
+
+
